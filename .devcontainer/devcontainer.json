@@ -1,0 +1,11 @@
+{
+  "name": "Kali Linux",
+  "image": "kalilinux/kali-rolling",
+  "remoteUser": "root",
+  "postCreateCommand": "apt update && apt install -y sudo git curl vim nmap metasploit-framework",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}
