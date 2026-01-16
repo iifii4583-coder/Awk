@@ -1,71 +1,85 @@
-name: Umepanux ISO Builder
+name: Build Umepanux OS
 
 on:
-  workflow_dispatch: # Manuel olarak başlatmak için
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install Essential Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y debootstrap squashfs-tools xorriso grub-pc-bin grub-efi-amd64-bin mtools libncurses-dev flex bison bc libelf-dev libssl-dev gcc make
+          sudo apt-get install -y debootstrap squashfs-tools xorriso grub-pc-bin \
+          grub-efi-amd64-bin mtools libncurses-dev flex bison bc libelf-dev \
+          libssl-dev gcc make wget tar xz-utils
 
-      - name: Build Linux Kernel
+      - name: Download and Compile Kernel 6.6.10
         run: |
-          KERNEL_VER=6.1.0
-          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VER.tar.xz
-          tar -xf linux-$KERNEL_VER.tar.xz
-          cd linux-$KERNEL_VER
+          # Tam link ve versiyon tanımlandı
+          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.10.tar.xz
+          tar -xf linux-6.6.10.tar.xz
+          cd linux-6.6.10
+          # Varsayılan konfigürasyon
           make defconfig
-          # Hızlı derleme için modülleri ve gereksizleri minimize edebilirsiniz
+          # GitHub makinelerinde çekirdek derleme (bzImage üretimi)
           make -j$(nproc) bzImage
           cp arch/x86/boot/bzImage ../vmlinuz
           cd ..
 
-      - name: Create Debian Rootfs (No Password)
+      - name: Build Debian Rootfs
         run: |
-          sudo debootstrap --arch=amd64 bullseye ./rootfs http://deb.debian.org/debian/
+          sudo mkdir -p rootfs
+          # Debian Bookworm (v12) kurulumu
+          sudo debootstrap --arch=amd64 bookworm ./rootfs http://deb.debian.org/debian/
           
-          # Otomatik giriş (No password login) yapılandırması
+          # Rootfs ayarları: Şifresiz giriş ve paketler
           sudo chroot ./rootfs /bin/bash -c "
             echo 'umepanux' > /etc/hostname
-            echo 'root:root' | chpasswd
-            # Getty override ile şifresiz giriş
+            
+            # Şifreyi tamamen kaldır
+            passwd -d root
+            
+            # Otomatik giriş için Getty servisini düzenle
             mkdir -p /etc/systemd/system/getty@tty1.service.d
             echo -e '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %I \$TERM' > /etc/systemd/system/getty@tty1.service.d/override.conf
+            
+            # İnternet ve temel araçları kur
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              linux-base kmod net-tools iproute2 iputils-ping \
+              wget curl vim nano python3 gcc g++ make git htop sudo
+            
+            apt-get clean
           "
           
-          # Rootfs'i sıkıştır
+          # Rootfs dosyasını sıkıştır (SquashFS)
           sudo mksquashfs ./rootfs filesystem.squashfs -comp xz
 
-      - name: Create ISO Structure
+      - name: Create ISO and GRUB Bootloader
         run: |
           mkdir -p iso_root/boot/grub
           cp vmlinuz iso_root/boot/vmlinuz
           cp filesystem.squashfs iso_root/boot/filesystem.squashfs
           
-          # Grub Menüsü Oluşturma
+          # GRUB ayar dosyası
           cat <<EOF > iso_root/boot/grub/grub.cfg
+          set timeout=0
           set default=0
-          set timeout=1
-          menuentry "Umepanux Linux" {
+          menuentry "Umepanux" {
               linux /boot/vmlinuz boot=live quiet
-              initrd /boot/initrd.img # Varsa
           }
           EOF
+          
+          # ISO dosyasını oluştur
+          grub-mkrescue -o umepanux-os.iso iso_root
 
-      - name: Generate ISO
-        run: |
-          grub-mkrescue -o umepanux.iso iso_root
-
-      - name: Upload Artifact
+      - name: Upload ISO Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: umepanux-iso
-          path: umepanux.iso
+          name: Umepanux-ISO
+          path: umepanux-os.iso
           
