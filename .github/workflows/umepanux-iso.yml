@@ -1,103 +1,71 @@
-name: Build Umepanux ISO
+name: Umepanux ISO Builder
 
 on:
-  push:
-  workflow_dispatch:
+  workflow_dispatch: # Manuel olarak başlatmak için
 
 jobs:
-  build-iso:
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Gerekli paketler
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
         run: |
-          sudo apt update
-          sudo apt install -y \
-            debootstrap \
-            build-essential \
-            bc bison flex \
-            libssl-dev libelf-dev \
-            ncurses-dev \
-            wget \
-            xorriso \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            mtools \
-            squashfs-tools \
-            cpio \
-            initramfs-tools
+          sudo apt-get update
+          sudo apt-get install -y debootstrap squashfs-tools xorriso grub-pc-bin grub-efi-amd64-bin mtools libncurses-dev flex bison bc libelf-dev libssl-dev gcc make
 
-      - name: Debian rootfs
+      - name: Build Linux Kernel
         run: |
-          sudo debootstrap --arch=amd64 stable rootfs http://deb.debian.org/debian
+          KERNEL_VER=6.1.0
+          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VER.tar.xz
+          tar -xf linux-$KERNEL_VER.tar.xz
+          cd linux-$KERNEL_VER
+          make defconfig
+          # Hızlı derleme için modülleri ve gereksizleri minimize edebilirsiniz
+          make -j$(nproc) bzImage
+          cp arch/x86/boot/bzImage ../vmlinuz
+          cd ..
 
-      - name: Kernel indir ve derle
+      - name: Create Debian Rootfs (No Password)
         run: |
-          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz
-          tar -xf linux-6.6.tar.xz
-          cd linux-6.6
+          sudo debootstrap --arch=amd64 bullseye ./rootfs http://deb.debian.org/debian/
+          
+          # Otomatik giriş (No password login) yapılandırması
+          sudo chroot ./rootfs /bin/bash -c "
+            echo 'umepanux' > /etc/hostname
+            echo 'root:root' | chpasswd
+            # Getty override ile şifresiz giriş
+            mkdir -p /etc/systemd/system/getty@tty1.service.d
+            echo -e '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %I \$TERM' > /etc/systemd/system/getty@tty1.service.d/override.conf
+          "
+          
+          # Rootfs'i sıkıştır
+          sudo mksquashfs ./rootfs filesystem.squashfs -comp xz
 
-          cp /boot/config-$(uname -r) .config || make defconfig
-          yes "" | make oldconfig
-          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -umepanux/' Makefile
-
-          make -j$(nproc)
-          sudo make modules_install INSTALL_MOD_PATH=../rootfs
-          sudo make INSTALL_PATH=../rootfs/boot install
-
-      - name: Sistem kimligi ve root sifresiz
+      - name: Create ISO Structure
         run: |
-          echo "umepanux" | sudo tee rootfs/etc/hostname
+          mkdir -p iso_root/boot/grub
+          cp vmlinuz iso_root/boot/vmlinuz
+          cp filesystem.squashfs iso_root/boot/filesystem.squashfs
+          
+          # Grub Menüsü Oluşturma
+          cat <<EOF > iso_root/boot/grub/grub.cfg
+          set default=0
+          set timeout=1
+          menuentry "Umepanux Linux" {
+              linux /boot/vmlinuz boot=live quiet
+              initrd /boot/initrd.img # Varsa
+          }
+          EOF
 
-          cat << EOF | sudo tee rootfs/etc/os-release
-ID=umepanux
-NAME="Umepanux"
-PRETTY_NAME="Umepanux 1.0 (Debian-based)"
-VERSION="1.0"
-VERSION_ID="1.0"
-EOF
-
-          # Root şifresini kaldır, şifresiz boot
-          sudo chroot rootfs passwd -d root || true
-
-      - name: initramfs
+      - name: Generate ISO
         run: |
-          sudo chroot rootfs apt update
-          sudo chroot rootfs apt install -y initramfs-tools
-          sudo chroot rootfs update-initramfs -c -k all || true
+          grub-mkrescue -o umepanux.iso iso_root
 
-      - name: ISO yapisi
-        run: |
-          mkdir -p iso/{boot/grub,live}
-          sudo mksquashfs rootfs iso/live/filesystem.squashfs -e boot
-          sudo cp rootfs/boot/vmlinuz-* iso/boot/vmlinuz
-          sudo cp rootfs/boot/initrd.img-* iso/boot/initrd
-
-          cat << EOF > iso/boot/grub/grub.cfg
-set default=0
-set timeout=3
-
-menuentry "Umepanux Live" {
-    linux /boot/vmlinuz boot=live username=root quiet
-    initrd /boot/initrd
-}
-EOF
-
-      - name: ISO olustur
-        run: |
-          xorriso -as mkisofs \
-            -iso-level 3 \
-            -o umepanux.iso \
-            -full-iso9660-filenames \
-            -volid "UMEPANUX" \
-            -eltorito-boot boot/grub/i386-pc/eltorito.img \
-            -no-emul-boot \
-            -boot-load-size 4 \
-            -boot-info-table \
-            iso
-
-      - name: ISO yukle
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: umepanux-iso
           path: umepanux.iso
+          
