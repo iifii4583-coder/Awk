@@ -1,0 +1,119 @@
+name: CyberLynx OS - Custom CyberGui (From Scratch)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🛰️ Checkout
+        uses: actions/checkout@v4
+
+      - name: 🛠️ OnurTools Build Essentials
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
+          qemu-utils xorriso grub-pc-bin grub-common mtools squashfs-tools wget cpio
+
+      - name: 🧠 Kernel 6.6.10 Derle (Cyber-Core)
+        run: |
+          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.10.tar.xz
+          tar -xf linux-6.6.10.tar.xz && cd linux-6.6.10
+          make defconfig
+          scripts/config --set-str CONFIG_LOCALVERSION "-CyberLynx"
+          scripts/config --enable CONFIG_FB_EFI
+          scripts/config --enable CONFIG_DRM_FBDEV_EMULATION
+          make -j$(nproc) bzImage
+          cd ..
+          mkdir -p iso_root/boot/grub
+          cp linux-6.6.10/arch/x86/boot/bzImage iso_root/boot/vmlinuz-cyberlynx
+
+      - name: 🎨 Sıfırdan CyberGui Oluştur (Python & X11)
+        run: |
+          mkdir -p rootfs/{bin,sbin,etc,usr/bin,usr/share/cyberlynx,var/lib/pacman}
+          
+          # CyberGui Ana Yazılımı (Sıfırdan Tasarım)
+          cat <<EOF > rootfs/usr/bin/cybergui
+          #!/usr/bin/python3
+          import tkinter as tk
+          from tkinter import messagebox
+          import os
+
+          root = tk.Tk()
+          root.title("CyberLynx OS - CyberGui v1.0")
+          root.attributes('-fullscreen', True)
+          root.configure(bg='#0a0a0a') # Siyah arka plan
+
+          # Başlık
+          label = tk.Label(root, text="CYBERLYNX INTERFACE", fg='#00ff00', bg='#0a0a0a', font=('Courier', 30, 'bold'))
+          label.pack(pady=50)
+
+          # Buton Fonksiyonları
+          def run_tool(name, cmd):
+              os.system(f"xterm -e '{cmd}' &")
+
+          # Menü Butonları (Sıfırdan Tasarlanmış)
+          btn_style = {'fg':'#00ff00', 'bg':'#1a1a1a', 'font':('Courier', 15), 'width':25, 'pady':10}
+          
+          tk.Button(root, text="NETWORK SCANNER", command=lambda: run_tool("Nmap", "pacman -Sy nmap && nmap --help"), **btn_style).pack(pady=10)
+          tk.Button(root, text="EXPLOIT FRAMEWORK", command=lambda: run_tool("Metasploit", "msfconsole"), **btn_style).pack(pady=10)
+          tk.Button(root, text="TERMINAL (SHELL)", command=lambda: run_tool("Terminal", "/bin/sh"), **btn_style).pack(pady=10)
+          tk.Button(root, text="SYSTEM UPDATE", command=lambda: run_tool("Update", "pacman -Syu"), **btn_style).pack(pady=10)
+          tk.Button(root, text="REBOOT", command=lambda: os.system("reboot"), fg='red', bg='#1a1a1a', font=('Courier', 15)).pack(side='bottom', pady=50)
+
+          root.mainloop()
+          EOF
+          chmod +x rootfs/usr/bin/cybergui
+
+      - name: ⚙️ Arch/BlackArch Yapılandırması (Stealth Repo)
+        run: |
+          cat <<EOF > rootfs/etc/pacman.conf
+          [options]
+          HoldPkg = pacman glibc
+          Architecture = auto
+          SigLevel = Never
+          [cyber-repo]
+          Server = https://mirror.rackspace.com/blackarch/\$repo/os/\$arch
+          EOF
+
+      - name: 📀 ISO Paketleme ve BootSplash
+        run: |
+          # BootSplash (GRUB Arka Plan)
+          wget -O iso_root/boot/grub/splash.png "https://raw.githubusercontent.com/iifii4583-coder/Awk/refs/heads/main/1768655851489.png"
+
+          # Start Script (Açılışta sadece CyberGui başlar)
+          cat <<EOF > rootfs/etc/init.d/rcS
+          #!/bin/sh
+          mount -t proc none /proc
+          mount -t sysfs none /sys
+          /sbin/mdev -s
+          # X server başlat ve senin yazdığın GUI'yi aç
+          X &
+          export DISPLAY=:0
+          python3 /usr/bin/cybergui
+          EOF
+          chmod +x rootfs/etc/init.d/rcS
+
+          # Paketle
+          cd rootfs && find . | cpio -H newc -o | gzip > ../iso_root/boot/initrd-cyberlynx.img && cd ..
+          
+          # GRUB Yapılandırması
+          cat <<EOF > iso_root/boot/grub/grub.cfg
+          insmod png
+          set timeout=2
+          background_image /boot/grub/splash.png
+          menuentry "CyberLynx OS (CyberGui)" {
+              linux /boot/vmlinuz-cyberlynx quiet splash
+              initrd /boot/initrd-cyberlynx.img
+          }
+          EOF
+          
+          grub-mkrescue -o CyberLynx-Final-Master.iso iso_root
+
+      - name: 📦 Artifact Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: CyberLynx-Custom-ISO
+          path: CyberLynx-Final-Master.iso
+          
