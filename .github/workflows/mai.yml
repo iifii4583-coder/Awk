@@ -1,0 +1,113 @@
+name: CyberLynx OS - BootSplash & XFCE4 Stealth Edition
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🛰️ Proje Kaynaklarını Çek
+        uses: actions/checkout@v4
+
+      - name: 🛠️ OnurTools Derleme Araçlarını Kur
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev \
+          qemu-utils arch-install-scripts libisoburn wget kmod cpio xorriso grub-pc-bin \
+          squashfs-tools debootstrap
+
+      - name: 🧠 Özel CyberLynx Kernel Derle (v6.6)
+        run: |
+          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.10.tar.xz
+          tar -xf linux-6.6.10.tar.xz
+          cd linux-6.6.10
+          make defconfig
+          scripts/config --set-str CONFIG_LOCALVERSION "-CyberLynx-OnurTools"
+          # BootSplash desteği için grafik sürücülerini kernel içine gömüyoruz
+          scripts/config --enable CONFIG_FB_EFI
+          scripts/config --enable CONFIG_DRM_FBDEV_EMULATION
+          make -j$(nproc) bzImage
+          cd ..
+          mkdir -p iso_root/boot
+          cp linux-6.6.10/arch/x86/boot/bzImage iso_root/boot/vmlinuz-cyberlynx
+
+      - name: 🖼️ Boot Splash (Logo) Hazırlığı
+        run: |
+          mkdir -p iso_root/boot/grub/themes/cyberlynx
+          # Logoyu GRUB açılış ekranına arka plan (Splash) olarak ekle
+          wget -O iso_root/boot/grub/themes/cyberlynx/splash.png "https://raw.githubusercontent.com/iifii4583-coder/Awk/refs/heads/main/1768655851489.png"
+
+      - name: 🖥️ XFCE4 & Stealth App Yapılandırması
+        run: |
+          mkdir -p rootfs/{bin,sbin,etc,proc,sys,dev,usr/bin,home/cyberlynx/Desktop}
+          
+          # BusyBox Kurulumu
+          wget https://busybox.net/downloads/busybox-1.36.1.tar.bz2
+          tar -xf busybox-1.36.1.tar.bz2 && cd busybox-1.36.1
+          make defconfig && sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          make -j$(nproc) install && cp -r _install/* ../rootfs/ && cd ..
+
+          # Logosuz Stealth Hacking Uygulaması (.desktop dosyası)
+          cat <<EOF > rootfs/home/cyberlynx/Desktop/CyberInterface.desktop
+          [Desktop Entry]
+          Name=Cyber Interface
+          Comment=OnurTools Stealth Hacking Menu
+          Exec=cyber-app
+          Icon=system-run
+          Terminal=true
+          Type=Application
+          Categories=System;Security;
+          EOF
+          chmod +x rootfs/home/cyberlynx/Desktop/CyberInterface.desktop
+
+          # Hacking Menü Scripti (Uygulama İçeriği)
+          cat <<EOF > rootfs/usr/bin/cyber-app
+          #!/bin/sh
+          clear
+          echo "======================================================"
+          echo "         CYBERLYNX STEALTH INTERFACE v1.0            "
+          echo "             POWERED BY ONURTOOLS                    "
+          echo "======================================================"
+          echo " [1] Net-Scan [2] Web-Attack [3] Cracking [4] Update"
+          echo "======================================================"
+          read -p "Select: " opt
+          case \$opt in
+            1) xterm -e "pacman -S --noconfirm nmap && nmap -A 127.0.0.1; read" ;;
+            2) xterm -e "pacman -S --noconfirm sqlmap && sqlmap -h; read" ;;
+            3) xterm -e "pacman -S --noconfirm john; read" ;;
+            4) xterm -e "pacman -Syu --noconfirm; read" ;;
+          esac
+          EOF
+          chmod +x rootfs/usr/bin/cyber-app
+
+      - name: 💿 Bootloader (GRUB) ve Splash Ayarı
+        run: |
+          mkdir -p iso_root/boot/grub
+          cat <<EOF > iso_root/boot/grub/grub.cfg
+          insmod png
+          set timeout=5
+          # Boot Splash Logo Ayarı
+          background_image /boot/grub/themes/cyberlynx/splash.png
+          set menu_color_normal=white/black
+          set menu_color_highlight=cyan/black
+          
+          menuentry "CyberLynx OS (OnurTools)" {
+              linux /boot/vmlinuz-cyberlynx quiet splash
+              initrd /boot/initrd-cyberlynx.img
+          }
+          EOF
+
+      - name: 🚀 ISO Üretimi
+        run: |
+          cd rootfs
+          find . | cpio -H newc -o | gzip > ../iso_root/boot/initrd-cyberlynx.img
+          cd ..
+          grub-mkrescue -o CyberLynx-OnurTools-Final.iso iso_root
+
+      - name: 📦 ISO Teslimatı
+        uses: actions/upload-artifact@v4
+        with:
+          name: CyberLynx-Final-ISO
+          path: CyberLynx-OnurTools-Final.iso
+          
