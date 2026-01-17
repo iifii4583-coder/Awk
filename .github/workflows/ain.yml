@@ -1,22 +1,22 @@
-name: CyberLynx OS - XFCE Master Build
+name: CyberLynx OS - Full XFCE (Correct Size)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-iso:
+  build-full-iso:
     runs-on: ubuntu-latest
     steps:
       - name: 🛰️ Kaynakları Çek
         uses: actions/checkout@v4
 
-      - name: 🛠️ Gerekli Araçları Kur
+      - name: 🛠️ OS İnşa Araçlarını Kur
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex libssl-dev libelf-dev \
-          qemu-utils xorriso grub-pc-bin grub-common mtools squashfs-tools wget cpio
+          qemu-utils xorriso grub-pc-bin grub-common mtools squashfs-tools wget cpio arch-install-scripts
 
-      - name: 🧠 Kernel 6.6 Derle
+      - name: 🧠 Cyber-Kernel 6.6.10 Derle
         run: |
           wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.10.tar.xz
           tar -xf linux-6.6.10.tar.xz && cd linux-6.6.10
@@ -29,73 +29,55 @@ jobs:
           mkdir -p iso_root/boot/grub
           cp linux-6.6.10/arch/x86/boot/bzImage iso_root/boot/vmlinuz-cyberlynx
 
-      - name: 🏗️ Rootfs ve Klasör Yapısını Oluştur (Hata Giderildi)
+      - name: 🏗️ Gerçek Rootfs İnşası (XFCE Dahil)
         run: |
-          # TÜM KLASÖRLERİ ÖNCE OLUŞTURUYORUZ (Hatanın çözümü burada)
-          mkdir -p rootfs/{bin,sbin,etc/init.d,usr/bin,usr/sbin,proc,sys,dev,tmp,var/lib/pacman}
-          
-          # Busybox'ı çekirdek komutlar için ekle
-          sudo apt-get install -y busybox-static
-          cp /bin/busybox rootfs/bin/
-          cd rootfs/bin && ./busybox --install -s . && cd ../../
+          mkdir -p rootfs
+          # Temel sistem ve XFCE paketlerini indiriyoruz (Boyut burada artacak)
+          sudo debootstrap --include=xfce4,xserver-xorg,xfce4-terminal,network-manager,lightdm,sudo,python3-tk stable rootfs http://deb.debian.org/debian/
 
-      - name: 🖥️ XFCE GUI ve Cyber-Config Yapılandırması
+      - name: 🎨 CyberLynx Özelleştirme
         run: |
-          # XFCE Başlatıcı Script
-          cat <<EOF > rootfs/usr/bin/start-xfce-custom
-          #!/bin/sh
-          X &
-          export DISPLAY=:0
-          exec startxfce4
-          EOF
-          chmod +x rootfs/usr/bin/start-xfce-custom
-
-          # BlackArch Repo Ekleme (Cyber-Repo adıyla)
-          cat <<EOF > rootfs/etc/pacman.conf
-          [options]
-          HoldPkg = pacman glibc
-          Architecture = auto
-          SigLevel = Never
-          [cyberlynx-core]
-          Server = https://mirror.rackspace.com/blackarch/\$repo/os/\$arch
-          EOF
-
-      - name: ⚙️ OS Başlatıcı (init.d/rcS) Yazımı
-        run: |
-          # ARTIK BU DOSYA HATA VERMEYECEK ÇÜNKÜ KLASÖRÜ YUKARIDA AÇTIK
-          cat <<EOF > rootfs/etc/init.d/rcS
+          # Klasörleri ve başlatıcıları hazırla
+          sudo mkdir -p rootfs/etc/init.d
+          sudo bash -c "cat <<EOF > rootfs/etc/init.d/rcS
           #!/bin/sh
           mount -t proc none /proc
           mount -t sysfs none /sys
           /sbin/mdev -s
-          echo "CyberLynx XFCE GUI Baslatiliyor..."
-          /usr/bin/start-xfce-custom
-          EOF
-          chmod +x rootfs/etc/init.d/rcS
+          exec startxfce4
+          EOF"
+          sudo chmod +x rootfs/etc/init.d/rcS
 
-      - name: 🖼️ Boot Splash (Vaşak Logosu)
+          # BlackArch Repo Ekleme
+          sudo bash -c "echo 'deb [trusted=yes] https://mirror.rackspace.com/blackarch/blackarch/os/x86_64/ /' > rootfs/etc/apt/sources.list.d/cyber.list"
+
+      - name: 🖼️ Boot Splash
         run: |
           wget -O iso_root/boot/grub/splash.png "https://raw.githubusercontent.com/iifii4583-coder/Awk/refs/heads/main/1768655851489.png"
 
-      - name: 💿 ISO Paketleme
+      - name: 💿 ISO Paketleme (SquashFS ile)
         run: |
-          cd rootfs && find . | cpio -H newc -o | gzip > ../iso_root/boot/initrd-cyberlynx.img && cd ..
+          # Sistemi sıkıştırılmış dosya sistemi haline getir (Gerçek OS mantığı)
+          sudo mksquashfs rootfs iso_root/live.squashfs -comp xz
           
+          # Initrd oluştur
+          cd rootfs && find . -maxdepth 1 -not -path '*/.*' | cpio -H newc -o | gzip > ../iso_root/boot/initrd.img && cd ..
+
           cat <<EOF > iso_root/boot/grub/grub.cfg
           insmod png
           set timeout=2
           background_image /boot/grub/splash.png
-          menuentry "CyberLynx OS (XFCE GUI)" {
-              linux /boot/vmlinuz-cyberlynx quiet splash
-              initrd /boot/initrd-cyberlynx.img
+          menuentry "CyberLynx OS Full (XFCE)" {
+              linux /boot/vmlinuz-cyberlynx boot=live quiet splash
+              initrd /boot/initrd.img
           }
           EOF
-          
-          grub-mkrescue -o CyberLynx-XFCE-Ultimate.iso iso_root
+
+          grub-mkrescue -o CyberLynx-Full.iso iso_root
 
       - name: 📦 ISO Yayınla
         uses: actions/upload-artifact@v4
         with:
-          name: CyberLynx-XFCE-ISO
-          path: CyberLynx-XFCE-Ultimate.iso
+          name: CyberLynx-Full-ISO
+          path: CyberLynx-Full.iso
           
