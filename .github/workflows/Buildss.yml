@@ -1,0 +1,124 @@
+name: ELKA Linux Image Build (amd64)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            debootstrap \
+            squashfs-tools \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            xorriso \
+            coreutils \
+            systemd-container
+
+      - name: Create base system (Bookworm amd64)
+        run: |
+          sudo debootstrap \
+            --arch=amd64 \
+            bookworm \
+            rootfs \
+            http://deb.debian.org/debian
+
+      - name: Prepare chroot
+        run: |
+          sudo mount --bind /dev rootfs/dev
+          sudo mount --bind /proc rootfs/proc
+          sudo mount --bind /sys rootfs/sys
+
+      - name: Install desktop & base packages
+        run: |
+          sudo chroot rootfs /bin/bash <<'EOF'
+          apt update
+          apt install -y \
+            kde-standard \
+            sddm \
+            network-manager \
+            sudo \
+            firefox-esr \
+            libreoffice \
+            plymouth \
+            xserver-xorg
+          EOF
+
+      - name: Add ELKA GUI Installer (Configurator)
+        run: |
+          sudo mkdir -p rootfs/usr/share/elka-installer
+          sudo cp -r config/elka-installer/* rootfs/usr/share/elka-installer/
+
+          sudo chroot rootfs /bin/bash <<'EOF'
+          cat <<EOT > /usr/share/applications/elka-installer.desktop
+          [Desktop Entry]
+          Name=ELKA İlk Kurulum
+          Exec=/usr/share/elka-installer/elka-installer
+          Type=Application
+          Categories=System;
+          EOT
+          EOF
+
+      - name: First boot configurator
+        run: |
+          sudo chroot rootfs /bin/bash <<'EOF'
+          cat <<EOT > /usr/local/bin/elka-firstboot
+          #!/bin/bash
+          /usr/share/elka-installer/elka-installer
+          systemctl disable elka-firstboot.service
+          EOT
+
+          chmod +x rootfs/usr/local/bin/elka-firstboot
+
+          cat <<EOT > rootfs/etc/systemd/system/elka-firstboot.service
+          [Unit]
+          Description=ELKA First Boot Setup
+          After=graphical.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/elka-firstboot
+
+          [Install]
+          WantedBy=graphical.target
+          EOT
+
+          sudo chroot rootfs systemctl enable elka-firstboot.service
+          EOF
+
+      - name: Lock disks (read-only)
+        run: |
+          sudo chroot rootfs /bin/bash <<'EOF'
+          cat <<EOT > /etc/udev/rules.d/99-elka-disk.rules
+          ACTION=="add", SUBSYSTEM=="block", RUN+="/bin/mount -o ro %N /mnt/%k"
+          EOT
+          EOF
+
+      - name: Build squashfs image
+        run: |
+          sudo mksquashfs rootfs elka-rootfs.squashfs -comp xz
+
+      - name: Create ISO
+        run: |
+          mkdir iso
+          cp elka-rootfs.squashfs iso/
+          xorriso -as mkisofs \
+            -o ELKA-Linux-amd64.iso \
+            -volid "ELKA_LINUX" \
+            iso
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ELKA-Linux-amd64
+          path: ELKA-Linux-amd64.iso
