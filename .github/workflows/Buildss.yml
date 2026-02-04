@@ -1,299 +1,264 @@
-name: ELKA Linux ISO Builder
+name: ELKA Linux Professional Master Build
 on:
-  workflow_dispatch: # Manuel tetikleme
+  workflow_dispatch: # Manuel tetikleme butonu
+  push:
+    branches: [ main ]
 
 jobs:
-  build:
+  build-elka-os:
     runs-on: ubuntu-22.04
-    privileged: true # Root yetkileri için gerekli (Docker/Container ortamı ise)
+    timeout-minutes: 120 # Uzun süreceği için süreyi artırdık
     
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v3
+      - name: 1. Depoyu Kontrol Et
+        uses: actions/checkout@v4
 
-    - name: Gerekli Paketlerin Kurulumu
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-            debootstrap squashfs-tools xorriso isolinux syslinux-utils \
-            grub-pc-bin grub-efi-amd64-bin mtools dosfstools \
-            libisoburn python3-tk git
+      - name: 2. Gerekli İnşa Paketlerini Sisteme Kur
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            debootstrap squashfs-tools xorriso grub-pc-bin \
+            grub-efi-amd64-bin mtools dosfstools libisoburn1 \
+            python3-tk curl wget rsync qemu-utils coreutils \
+            linux-image-amd64 live-boot cpio bc gdisk
 
-    - name: Çalışma Alanı Hazırlığı (Workspace)
-      run: |
-        # Klasör yapısını oluştur
-        mkdir -p build/chroot
-        mkdir -p build/image/isolinux
-        mkdir -p build/image/live
-        mkdir -p build/image/EFI/BOOT
-        mkdir -p build/image/boot/grub
-        
-        # ELKA Installer için konfigürasyon klasörü kontrolü
-        if [ ! -d "config/elka-installer" ]; then
-          echo "Installer config bulunamadı, oluşturuluyor..."
+      - name: 3. Çalışma Dizinlerini Oluştur
+        run: |
+          # Temiz ve izole çalışma alanları
+          mkdir -p build/chroot
+          mkdir -p build/image/live
+          mkdir -p build/image/boot/grub
+          mkdir -p build/image/isolinux
           mkdir -p config/elka-installer
-        fi
 
-    - name: Debian Bookworm Taban Sistem Kurulumu (Bootstrap)
-      run: |
-        # Debian Bookworm temel dosyalarını indir
-        sudo debootstrap \
-            --arch=amd64 \
-            --variant=minbase \
-            bookworm \
-            build/chroot \
-            http://deb.debian.org/debian/
+      - name: 4. Debian Bookworm Base (Debootstrap)
+        run: |
+          # Minimal ama sağlam bir taban kurulumu
+          sudo debootstrap --arch=amd64 --variant=minbase bookworm build/chroot http://deb.debian.org/debian/
 
-    - name: Sistem Yapılandırması ve KDE Kurulumu (Chroot)
-      run: |
-        # --- CHROOT İÇİNE GİRECEK SCRIPT HAZIRLIĞI ---
-        cat <<EOF > build/chroot/install_system.sh
-        #!/bin/bash
-        export DEBIAN_FRONTEND=noninteractive
-        
-        # 1. /usr/bin/env kontrolü ve düzeltmesi
-        if [ ! -f /usr/bin/env ]; then
-            ln -s /usr/bin/coreutils /usr/bin/env || true
-        fi
+      - name: 5. ELKA Sistem Özelleştirme (Derinlemesine Chroot)
+        run: |
+          # Chroot içinde çalışacak devasa yapılandırma betiği
+          cat <<'EOF' > build/chroot/elka_os_core.sh
+          #!/bin/bash
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          export LC_ALL=C
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-        # 2. Kernel ve Temel Paketler
-        apt-get update
-        apt-get install -y --no-install-recommends \
-            linux-image-amd64 live-boot systemd-sysv \
-            network-manager net-tools wireless-tools \
-            sudo python3-tk python3-pil python3-pil.imagetk xterm \
-            polkitd pkexec
+          # --- /usr/bin/env Eksikse Giderilmesi ---
+          if [ ! -f /usr/bin/env ]; then ln -s /usr/bin/coreutils /usr/bin/env; fi
 
-        # 3. KDE Plasma Masaüstü (Minimal)
-        apt-get install -y --no-install-recommends \
+          # --- Repo Yapılandırması (Main + Contrib + Non-Free + Security) ---
+          cat <<R > /etc/apt/sources.list
+          deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
+          deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
+          deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+          R
+          
+          apt-get update
+
+          # --- Kernel ve Firmware (Intel i5 ve tüm donanımlar için tam destek) ---
+          apt-get install -y --no-install-recommends \
+            linux-image-amd64 live-boot systemd-sysv sudo network-manager \
+            firmware-linux firmware-linux-nonfree firmware-realtek \
+            firmware-iwlwifi firmware-amd-graphics intel-microcode \
+            pipewire pipewire-audio-client-libraries alsa-utils \
+            bluetooth bluez rfkill brightnessctl
+
+          # --- KDE Plasma ve Grafik Arayüz (Okul İçin Optimize) ---
+          apt-get install -y --no-install-recommends \
             kde-plasma-desktop sddm plasma-nm konsole dolphin \
-            kde-config-sddm kscreen
+            kio-extras kscreen kde-config-gtk-style kde-style-breeze \
+            plasma-pa okular gwenview kcalc ark xdg-utils
 
-        # 4. Kullanıcı Hesapları
-        # Öğrenci hesabı (parolasız/autologin için)
-        useradd -m -s /bin/bash ogrenci
-        passwd -d ogrenci # Parolayı kaldır
-        
-        # Öğretmen hesabı (sudo yetkili, parolası GUI ile belirlenecek)
-        useradd -m -s /bin/bash ogretmen
-        usermod -aG sudo ogretmen
-        # Geçici bir parola veriyoruz, GUI bunu değiştirecek
-        echo "ogretmen:elka123" | chpasswd
+          # --- EĞİTİM VE TOOL SETİ (TAM LİSTE) ---
+          apt-get install -y \
+            libreoffice-qt5 libreoffice-l10n-tr \
+            vlc gimp scratch geany tuxpaint gcompris-qt \
+            firefox-esr-l10n-tr htop neofetch nano wget curl git \
+            build-essential python3-full python3-tk python3-pil \
+            zip unzip p7zip-full synaptic gdebi-core
 
-        # 5. SDDM Autologin (Öğrenci için)
-        mkdir -p /etc/sddm.conf.d
-        echo "[Autologin]
-        User=ogrenci
-        Session=plasma.desktop
-        Relogin=false" > /etc/sddm.conf.d/autologin.conf
+          # --- Türkçe Dil ve Yerelleştirme ---
+          apt-get install -y locales
+          echo "tr_TR.UTF-8 UTF-8" > /etc/locale.gen
+          locale-gen
+          echo "LANG=tr_TR.UTF-8" > /etc/default/locale
+          echo "Europe/Istanbul" > /etc/timezone
+          ln -fs /usr/share/zoneinfo/Europe/Istanbul /etc/localtime
 
-        # 6. Polkit Kuralları (USB Yetkileri)
-        # Öğretmen tam yetkili, öğrenci sınırlı
-        cat <<POLKIT > /etc/polkit-1/rules.d/50-elka-usb.rules
-        polkit.addRule(function(action, subject) {
-            if (action.id.indexOf("org.freedesktop.udisks2.filesystem-mount") == 0) {
-                if (subject.user == "ogretmen") {
-                    return polkit.Result.YES;
-                }
-                if (subject.user == "ogrenci") {
-                     // Öğrenci sadece kendi oturumunda salt okunur veya kısıtlı olabilir
-                     // Buraya spesifik kurallar eklenebilir. Şimdilik izin veriyoruz.
-                    return polkit.Result.YES;
-                }
-            }
-        });
-        POLKIT
+          # --- Kullanıcı Hesapları ve Yetkilendirme ---
+          # 'ogrenci' hesabı: Şifresiz, kısıtlı
+          useradd -m -s /bin/bash ogrenci
+          passwd -d ogrenci
+          
+          # 'ogretmen' hesabı: Sudo yetkili
+          useradd -m -s /bin/bash ogretmen
+          echo "ogretmen:elka123" | chpasswd
+          usermod -aG sudo ogretmen
 
-        # 7. Hostname ve Locale
-        echo "elka-linux" > /etc/hostname
-        echo "127.0.0.1 localhost" > /etc/hosts
-        apt-get install -y locales
-        echo "tr_TR.UTF-8 UTF-8" > /etc/locale.gen
-        locale-gen
-        echo "LANG=tr_TR.UTF-8" > /etc/default/locale
+          # --- Polkit Kuralları (Disk ve USB Güvenliği) ---
+          mkdir -p /etc/polkit-1/rules.d/
+          cat <<P > /etc/polkit-1/rules.d/50-elka-security.rules
+          polkit.addRule(function(action, subject) {
+              if (action.id.indexOf("org.freedesktop.udisks2.filesystem-mount") == 0) {
+                  if (subject.user == "ogretmen") return polkit.Result.YES;
+                  return polkit.Result.AUTH_ADMIN;
+              }
+          });
+          P
 
-        # 8. Temizlik
-        apt-get clean
-        rm -rf /var/lib/apt/lists/*
-        EOF
-        
-        # Scripti çalıştırılabilir yap ve chroot içinde çalıştır
-        chmod +x build/chroot/install_system.sh
-        
-        # Gerekli mount işlemleri
-        sudo mount --bind /dev build/chroot/dev
-        sudo mount --bind /proc build/chroot/proc
-        sudo mount --bind /sys build/chroot/sys
-        
-        # Chroot komutu
-        sudo chroot build/chroot /install_system.sh
-        
-        # Unmount işlemleri
-        sudo umount build/chroot/sys
-        sudo umount build/chroot/proc
-        sudo umount build/chroot/dev
-        
-        # Scripti sil
-        rm build/chroot/install_system.sh
+          # --- SDDM Otomatik Giriş (Öğrenci Hesabına) ---
+          mkdir -p /etc/sddm.conf.d/
+          echo -e "[Autologin]\nUser=ogrenci\nSession=plasma.desktop\nRelogin=false" > /etc/sddm.conf.d/autologin.conf
 
-    - name: ELKA Installer GUI ve Branding Entegrasyonu
-      run: |
-        # --- ELKA INSTALLER (PYTHON/TKINTER) ---
-        # Bu script sadece ilk açılışta çalışacak.
-        
-        cat <<'PY_SCRIPT' > build/chroot/usr/local/bin/elka-installer.py
-        import tkinter as tk
-        from tkinter import messagebox
-        import subprocess
-        import os
-        import sys
+          # --- KDE Başlangıç Optimizasyonları (Default Settings) ---
+          mkdir -p /etc/skel/.config
+          echo "[Icons]\nTheme=breeze-dark" > /etc/skel/.config/kdeglobals
+          
+          # --- Temizlik ---
+          apt-get autoremove -y
+          apt-get clean
+          EOF
 
-        def set_config():
-            pwd = entry_pwd.get()
-            if not pwd:
-                messagebox.showerror("Hata", "Lütfen bir parola girin.")
-                return
-            
-            # Öğretmen parolasını ayarla
-            try:
-                proc = subprocess.Popen(['chpasswd'], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-                proc.communicate(input=f"ogretmen:{pwd}".encode())
-                if proc.returncode != 0:
-                    raise Exception("Parola değiştirilemedi")
-                
-                # USB Kısıtlaması (Demo: Öğrenci grubunu usb'den men etme örneği)
-                if var_usb.get() == 1:
-                    # Basit bir örnek: Öğrenciyi plugdev grubundan çıkarabiliriz veya polkit kuralı yazabiliriz
-                    # Burada sembolik bir işlem yapıyoruz
-                    pass 
-                
-                # Kurulum tamamlandı bayrağı
-                with open("/etc/elka_installed", "w") as f:
-                    f.write("INSTALLED")
-                
-                # Kendini autostart'tan kaldır
-                if os.path.exists("/etc/xdg/autostart/elka-installer.desktop"):
-                    os.remove("/etc/xdg/autostart/elka-installer.desktop")
+          # Mount ve Chroot İşlemi
+          sudo mount --bind /dev build/chroot/dev
+          sudo mount --bind /proc build/chroot/proc
+          sudo mount --bind /sys build/chroot/sys
+          sudo mount --bind /dev/pts build/chroot/dev/pts
 
-                messagebox.showinfo("Başarılı", "ELKA Linux Yapılandırıldı! Sistem yeniden başlatılacak.")
-                subprocess.run(["reboot"])
-                
-            except Exception as e:
-                messagebox.showerror("Hata", str(e))
+          sudo chmod +x build/chroot/elka_os_core.sh
+          sudo chroot build/chroot /bin/bash /elka_os_core.sh
 
-        # Root kontrolü (GUI olarak çalışsa da root hakları gerekli)
-        if os.geteuid() != 0:
-            messagebox.showerror("Hata", "Bu araç root yetkisi gerektirir.")
-            sys.exit(1)
+          # Güvenli Unmount
+          sudo umount -l build/chroot/dev/pts || true
+          sudo umount -l build/chroot/dev || true
+          sudo umount -l build/chroot/proc || true
+          sudo umount -l build/chroot/sys || true
+          sudo rm build/chroot/elka_os_core.sh
 
-        root = tk.Tk()
-        root.title("ELKA Linux İlk Kurulum")
-        root.geometry("400x300")
+      - name: 6. ELKA Installer GUI (Özel Geliştirilmiş Sürüm)
+        run: |
+          # Installer Python Kodunu Hazırla
+          sudo mkdir -p build/chroot/usr/local/bin
+          cat <<'EOF' | sudo tee build/chroot/usr/local/bin/elka-installer.py
+          import tkinter as tk
+          from tkinter import messagebox, ttk
+          import subprocess
+          import os
 
-        tk.Label(root, text="ELKA Okul Sistemi Kurulumu", font=("Arial", 16)).pack(pady=10)
-        tk.Label(root, text="Öğretmen Hesabı Parolası Belirle:", font=("Arial", 10)).pack(pady=5)
+          class ElkaInstaller:
+              def __init__(self, root):
+                  self.root = root
+                  self.root.title("ELKA Linux Yapılandırma Sihirbazı")
+                  self.root.geometry("600x450")
+                  self.root.configure(bg="#2c3e50")
+                  
+                  # Tasarım öğeleri
+                  self.style = ttk.Style()
+                  self.style.configure("TButton", font=("Arial", 11))
+                  
+                  self.header = tk.Label(root, text="ELKA LINUX", font=("Arial", 24, "bold"), fg="#3498db", bg="#2c3e50")
+                  self.header.pack(pady=20)
+                  
+                  self.info = tk.Label(root, text="Okul sistemine hoş geldiniz.\nLütfen öğretmen şifresini belirleyerek sistemi kilitleyin.", 
+                                       fg="white", bg="#2c3e50", font=("Arial", 10))
+                  self.info.pack(pady=10)
 
-        entry_pwd = tk.Entry(root, show="*", font=("Arial", 12))
-        entry_pwd.pack(pady=5)
+                  # Şifre alanları
+                  tk.Label(root, text="Yeni Öğretmen Şifresi:", fg="white", bg="#2c3e50").pack()
+                  self.pwd1 = tk.Entry(root, show="*", width=30, font=("Arial", 12))
+                  self.pwd1.pack(pady=5)
+                  
+                  tk.Label(root, text="Şifreyi Tekrarla:", fg="white", bg="#2c3e50").pack()
+                  self.pwd2 = tk.Entry(root, show="*", width=30, font=("Arial", 12))
+                  self.pwd2.pack(pady=5)
 
-        var_usb = tk.IntVar()
-        chk_usb = tk.Checkbutton(root, text="Öğrenci USB Erişimini Kısıtla", variable=var_usb)
-        chk_usb.pack(pady=10)
+                  # USB Kısıtlama Seçeneği
+                  self.usb_var = tk.BooleanVar(value=True)
+                  self.usb_chk = tk.Checkbutton(root, text="Öğrenci USB Yetkilerini Sınırla (Önerilen)", 
+                                                variable=self.usb_var, fg="white", bg="#2c3e50", selectcolor="#34495e")
+                  self.usb_chk.pack(pady=15)
 
-        tk.Button(root, text="Ayarları Kaydet ve Başlat", command=set_config, bg="green", fg="white").pack(pady=20)
+                  self.btn = tk.Button(root, text="SİSTEMİ TAMAMLA", command=self.apply, 
+                                       bg="#27ae60", fg="white", font=("Arial", 12, "bold"), padx=20, pady=10)
+                  self.btn.pack(pady=20)
 
-        root.mainloop()
-        PY_SCRIPT
-        
-        chmod +x build/chroot/usr/local/bin/elka-installer.py
+              def apply(self):
+                  p1 = self.pwd1.get()
+                  if p1 != self.pwd2.get() or len(p1) < 4:
+                      messagebox.showerror("Hata", "Şifreler eşleşmiyor veya çok kısa (Min 4)!")
+                      return
+                  
+                  try:
+                      # Şifre güncelleme
+                      subprocess.run(f"echo 'ogretmen:{p1}' | chpasswd", shell=True, check=True)
+                      
+                      # Kendini silme (Tek seferlik çalışma)
+                      if os.path.exists("/etc/xdg/autostart/elka-installer.desktop"):
+                          os.remove("/etc/xdg/autostart/elka-installer.desktop")
+                      
+                      messagebox.showinfo("Başarılı", "ELKA Linux başarıyla yapılandırıldı.\nSistem şimdi yeniden başlatılacak.")
+                      os.system("reboot")
+                  except Exception as e:
+                      messagebox.showerror("Hata", f"Sistem güncellenirken hata oluştu: {e}")
 
-        # --- AUTOSTART ENTRY ---
-        # KDE açıldığında bu installer'ın root yetkisiyle çalışması gerekir.
-        # Bu biraz tricky. En temiz yol sudoers'da nopasswd verip autostart'a eklemektir.
-        
-        mkdir -p build/chroot/etc/xdg/autostart
-        cat <<EOF > build/chroot/etc/xdg/autostart/elka-installer.desktop
-        [Desktop Entry]
-        Type=Application
-        Name=ELKA Installer
-        Exec=sudo /usr/bin/python3 /usr/local/bin/elka-installer.py
-        Terminal=false
-        EOF
-        
-        # Sudoers ayarı (Sadece installer scripti için parolasız sudo)
-        echo "ogrenci ALL=(ALL) NOPASSWD: /usr/bin/python3 /usr/local/bin/elka-installer.py" >> build/chroot/etc/sudoers
+          if __name__ == "__main__":
+              root = tk.Tk()
+              app = ElkaInstaller(root)
+              root.mainloop()
+          EOF
+          sudo chmod +x build/chroot/usr/local/bin/elka-installer.py
 
-        # --- BRANDING ---
-        # Duvar kağıdı ve logo için placeholder oluşturuyoruz
-        mkdir -p build/chroot/usr/share/wallpapers/ELKA/contents/images
-        # Buraya gerçek bir resim indirilebilir, şimdilik renkli bir boş resim
-        convert -size 1920x1080 xc:lightblue build/chroot/usr/share/wallpapers/ELKA/contents/images/1920x1080.png || true
-        
-        # KDE Default Wallpaper Ayarı (Global Theme veya Config ile yapılabilir)
-        # Basitlik için varsayılanı bırakıyoruz ama dosya yapısını hazırladık.
+          # Autostart: Öğrenci masaüstü açıldığında otomatik çalışsın
+          sudo mkdir -p build/chroot/etc/xdg/autostart
+          cat <<EOF | sudo tee build/chroot/etc/xdg/autostart/elka-installer.desktop
+          [Desktop Entry]
+          Type=Application
+          Name=ELKA Installer
+          Exec=sudo /usr/bin/python3 /usr/local/bin/elka-installer.py
+          Terminal=false
+          X-GNOME-Autostart-enabled=true
+          EOF
 
-    - name: RootFS Sıkıştırma (SquashFS)
-      run: |
-        echo "RootFS sıkıştırılıyor... Bu işlem zaman alabilir."
-        sudo mksquashfs build/chroot build/image/live/filesystem.squashfs -comp xz
+          # Sudoers: Şifresiz çalıştırma izni
+          echo "ogrenci ALL=(ALL) NOPASSWD: /usr/bin/python3 /usr/local/bin/elka-installer.py" | sudo tee -a build/chroot/etc/sudoers
 
-    - name: Bootloader Yapılandırması (GRUB & ISOLINUX)
-      run: |
-        # Kernel ve initrd'yi ISO dizinine kopyala
-        cp build/chroot/boot/vmlinuz-* build/image/live/vmlinuz
-        cp build/chroot/boot/initrd.img-* build/image/live/initrd
-        
-        # GRUB Config (UEFI & BIOS)
-        cat <<EOF > build/image/boot/grub/grub.cfg
-        set default=0
-        set timeout=5
-        
-        menuentry "ELKA Linux (Okul Surumu)" {
-            linux /live/vmlinuz boot=live components quiet splash persistence
-            initrd /live/initrd
-        }
-        
-        menuentry "ELKA Linux (Guvenli Mod)" {
-            linux /live/vmlinuz boot=live components nomodeset
-            initrd /live/initrd
-        }
-        EOF
-        
-        # EFI Image Oluşturma
-        dd if=/dev/zero of=efiboot.img bs=1M count=20
-        mkfs.vfat efiboot.img
-        mmd -i efiboot.img ::/EFI
-        mmd -i efiboot.img ::/EFI/BOOT
-        grub-mkimage -o bootx64.efi -p /EFI/BOOT -O x86_64-efi \
-         part_gpt part_msdos fat iso9660
-        mcopy -i efiboot.img bootx64.efi ::/EFI/BOOT/BOOTX64.EFI
-        cp efiboot.img build/image/boot/grub/
-        
-        # Grub dosyalarını kopyala
-        cp -r /usr/lib/grub/x86_64-efi/* build/image/boot/grub/ || true
+      - name: 7. ISO İnşası (Hybrid & UEFI Destekli)
+        run: |
+          # 1. RootFS SquashFS Sıkıştırma (En yüksek sıkıştırma - XZ)
+          sudo mksquashfs build/chroot build/image/live/filesystem.squashfs -comp xz -noappend
+          
+          # 2. Kernel ve Initrd kopyalama (Dinamik isimle)
+          KERNEL_PATH=$(ls build/chroot/boot/vmlinuz-* | head -n 1)
+          INITRD_PATH=$(ls build/chroot/boot/initrd.img-* | head -n 1)
+          cp "$KERNEL_PATH" build/image/live/vmlinuz
+          cp "$INITRD_PATH" build/image/live/initrd
+          
+          # 3. Grub Yapılandırması
+          cat <<EOF > build/image/boot/grub/grub.cfg
+          set timeout=3
+          set default=0
+          insmod all_video
+          
+          menuentry "ELKA Linux v1.0 [Okul Modu]" {
+              linux /live/vmlinuz boot=live quiet splash persistence ---
+              initrd /live/initrd
+          }
+          
+          menuentry "ELKA Linux (Güvenli Mod)" {
+              linux /live/vmlinuz boot=live nomodeset quiet splash
+              initrd /live/initrd
+          }
+          EOF
+          
+          # 4. Profesyonel ISO Üretimi
+          grub-mkrescue -o elka-linux-master.iso build/image
 
-    - name: ISO Üretimi (Xorriso)
-      run: |
-        echo "ISO oluşturuluyor..."
-        xorriso \
-           -as mkisofs \
-           -iso-level 3 \
-           -o elka-linux-bookworm.iso \
-           -full-iso9660-filenames \
-           -volid "ELKA_LINUX" \
-           -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-           -eltorito-boot isolinux/isolinux.bin \
-           -no-emul-boot -boot-load-size 4 -boot-info-table \
-           --eltorito-catalog isolinux/boot.cat \
-           -eltorito-alt-boot \
-           -e boot/grub/efiboot.img \
-           -no-emul-boot -isohybrid-gpt-basdat \
-           build/image
-
-    - name: Artifact Olarak Yükle
-      uses: actions/upload-artifact@v4
-      with:
-        name: elka-linux-iso
-        path: elka-linux-bookworm.iso
-        retention-days: 5
-        
+      - name: 8. ISO'yu Yayınla
+        uses: actions/upload-artifact@v4
+        with:
+          name: ELKA-Linux-Ultimate-ISO
+          path: elka-linux-master.iso
+          
