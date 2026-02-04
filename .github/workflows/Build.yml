@@ -1,98 +1,224 @@
-name: ELKA Linux ISO Build (amd64)
-
+name: ELKA Linux Professional Distribution Builder
 on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch:
+  workflow_dispatch: # Manuel tetikleme için
 
 jobs:
-  build:
+  build-elka-os:
     runs-on: ubuntu-22.04
-
+    permissions:
+      contents: write
     steps:
-      - name: Checkout repo
+      - name: Kaynak Kodunu Çek
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Gerekli İnşa Paketlerini Yükle
         run: |
-          sudo apt update
-          sudo apt install -y \
-            debootstrap \
-            squashfs-tools \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            xorriso \
-            isolinux \
-            syslinux-utils \
-            coreutils \
-            dosfstools \
-            mtools
+          sudo apt-get update
+          sudo apt-get install -y \
+            debootstrap squashfs-tools xorriso grub-pc-bin \
+            grub-efi-amd64-bin mtools dosfstools libisoburn1 \
+            python3-tk curl wget rsync qemu-utils coreutils \
+            linux-image-amd64 live-boot cpio
 
-      - name: Bootstrap Debian Bookworm
+      - name: RootFS ve Çalışma Alanı Hazırlığı
         run: |
-          sudo debootstrap \
-            --arch=amd64 \
-            bookworm \
-            rootfs \
-            http://deb.debian.org/debian
+          mkdir -p build/chroot
+          mkdir -p build/image/live
+          mkdir -p build/image/boot/grub
+          # Debian Bookworm temel sistemini çek (Hızlı yansı kullanımı)
+          sudo debootstrap --arch=amd64 bookworm build/chroot http://deb.debian.org/debian/
 
-      - name: Copy ELKA Installer & Configs
+      - name: Derin Sistem Yapılandırması (Chroot Bloğu)
         run: |
-          sudo mkdir -p rootfs/usr/share/elka-installer
-          sudo cp -r config/elka-installer/* rootfs/usr/share/elka-installer/
-
-      - name: Add first boot service
-        run: |
-          sudo chroot rootfs /bin/bash <<'EOF'
-          cat <<EOT > /usr/local/bin/elka-firstboot
+          # Chroot içinde çalışacak devasa yapılandırma betiği
+          cat <<EOF > build/chroot/pro_setup.sh
           #!/bin/bash
-          /usr/share/elka-installer/elka-installer
-          systemctl disable elka-firstboot.service
-          EOT
-          chmod +x /usr/local/bin/elka-firstboot
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+          export HOME=/root
+          export LC_ALL=C
+
+          # 1. /usr/bin/env Eksikse Giderilmesi (Kritik Hata Önleyici)
+          if [ ! -f /usr/bin/env ]; then
+            ln -s /usr/bin/coreutils /usr/bin/env
+          fi
+
+          # 2. Repo Listesini Genişlet (Non-free ve Contrib eklenir)
+          echo "deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list
+          echo "deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list
+          echo "deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
           
-          cat <<EOT > /etc/systemd/system/elka-firstboot.service
-          [Unit]
-          Description=ELKA First Boot Setup
-          After=graphical.target
+          apt-get update
 
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/local/bin/elka-firstboot
+          # 3. Kernel ve Donanım Sürücüleri (i5 ve modern sistemler için tam destek)
+          apt-get install -y --no-install-recommends \
+            linux-image-amd64 live-boot systemd-sysv sudo network-manager \
+            firmware-linux firmware-linux-nonfree firmware-realtek \
+            firmware-iwlwifi firmware-amd-graphics firmware-misc-nonfree \
+            intel-microcode pipewire pipewire-audio-client-libraries
 
-          [Install]
-          WantedBy=graphical.target
-          EOT
+          # 4. KDE Plasma Masaüstü Ortamı (Okul Optimizasyonlu)
+          apt-get install -y --no-install-recommends \
+            kde-plasma-desktop sddm plasma-nm konsole dolphin \
+            kio-extras kscreen kde-config-gtk-style kde-style-breeze \
+            plasma-pa okular gwenview kcalc ark
 
-          systemctl enable elka-firstboot.service
+          # 5. EĞİTİM VE TOOL PAKETLERİ (Full Eğitim Seti)
+          apt-get install -y \
+            libreoffice-qt5 libreoffice-l10n-tr \
+            vlc gimp scratch tuxpaint geany \
+            firefox-esr-l10n-tr \
+            htop neofetch nano wget curl git \
+            build-essential python3-full python3-tk
+
+          # 6. Yerelleştirme ve Türkçe Desteği
+          apt-get install -y locales
+          echo "tr_TR.UTF-8 UTF-8" > /etc/locale.gen
+          locale-gen
+          echo "LANG=tr_TR.UTF-8" > /etc/default/locale
+          echo "Europe/Istanbul" > /etc/timezone
+          ln -fs /usr/share/zoneinfo/Europe/Istanbul /etc/localtime
+
+          # 7. Kullanıcı ve Güvenlik Yapılandırması
+          # Öğrenci: Kısıtlı, otomatik giriş yapan kullanıcı
+          useradd -m -s /bin/bash ogrenci
+          passwd -d ogrenci
+          
+          # Öğretmen: Sudo yetkili, parolası sonra belirlenecek
+          useradd -m -s /bin/bash ogretmen
+          echo "ogretmen:elka123" | chpasswd
+          usermod -aG sudo ogretmen
+
+          # 8. Polkit Güvenlik Kuralları (USB ve Disk Erişimi)
+          mkdir -p /etc/polkit-1/rules.d/
+          cat <<P > /etc/polkit-1/rules.d/50-elka.rules
+          polkit.addRule(function(action, subject) {
+              if (action.id.indexOf("org.freedesktop.udisks2.filesystem-mount") == 0) {
+                  return (subject.user == "ogretmen") ? polkit.Result.YES : polkit.Result.AUTH_ADMIN;
+              }
+          });
+          P
+
+          # 9. SDDM Otomatik Giriş (Öğrenci Hesabı İçin)
+          mkdir -p /etc/sddm.conf.d/
+          echo -e "[Autologin]\nUser=ogrenci\nSession=plasma.desktop\nRelogin=false" > /etc/sddm.conf.d/autologin.conf
+
+          # 10. Sistem Temizliği
+          apt-get autoremove -y
+          apt-get clean
           EOF
 
-      - name: Build SquashFS
-        run: |
-          sudo mksquashfs rootfs elka-rootfs.squashfs -comp xz
+          # Chroot Mount ve Çalıştırma
+          sudo chmod +x build/chroot/pro_setup.sh
+          sudo mount --bind /dev build/chroot/dev
+          sudo mount --bind /proc build/chroot/proc
+          sudo mount --bind /sys build/chroot/sys
+          sudo chroot build/chroot /bin/bash /pro_setup.sh
+          sudo umount build/chroot/dev build/chroot/proc build/chroot/sys
+          sudo rm build/chroot/pro_setup.sh
 
-      - name: Prepare ISO directory
+      - name: ELKA Installer (First-Run GUI) Entegrasyonu
         run: |
-          mkdir iso
-          cp -r boot iso/
-          cp elka-rootfs.squashfs iso/
+          # Installer Scripti Oluştur
+          sudo mkdir -p build/chroot/usr/local/bin
+          cat <<'EOF' | sudo tee build/chroot/usr/local/bin/elka-installer.py
+          import tkinter as tk
+          from tkinter import messagebox, ttk
+          import subprocess
+          import os
 
-      - name: Build ISO with xorriso
+          def finalize():
+              p1 = entry_p.get()
+              p2 = entry_p2.get()
+              if p1 != p2 or len(p1) < 4:
+                  messagebox.showerror("Hata", "Şifreler eşleşmiyor veya çok kısa!")
+                  return
+              
+              try:
+                  # Öğretmen şifresini güncelle
+                  subprocess.run(f"echo 'ogretmen:{p1}' | chpasswd", shell=True, check=True)
+                  # Autostart dosyasını sil (Bir daha çalışmasın)
+                  if os.path.exists("/etc/xdg/autostart/elka-installer.desktop"):
+                      os.remove("/etc/xdg/autostart/elka-installer.desktop")
+                  
+                  messagebox.showinfo("ELKA Linux", "Sistem Başarıyla Yapılandırıldı!\nKeyifli kullanımlar.")
+                  os.system("reboot")
+              except:
+                  messagebox.showerror("Hata", "Sistem ayarları güncellenemedi!")
+
+          root = tk.Tk()
+          root.title("ELKA Linux - Kurulum Sihirbazı")
+          root.geometry("500x400")
+          root.configure(bg="#f0f0f0")
+
+          style = ttk.Style()
+          style.configure("TLabel", font=("Arial", 11), background="#f0f0f0")
+
+          tk.Label(root, text="ELKA LINUX KURULUMU", font=("Arial", 18, "bold"), bg="#f0f0f0", fg="#2c3e50").pack(pady=20)
+          tk.Label(root, text="Öğretmen Hesabı İçin Yeni Şifre Belirleyin", bg="#f0f0f0").pack()
+          
+          entry_p = tk.Entry(root, show="*", width=30)
+          entry_p.pack(pady=10)
+          
+          tk.Label(root, text="Şifreyi Tekrar Girin:", bg="#f0f0f0").pack()
+          entry_p2 = tk.Entry(root, show="*", width=30)
+          entry_p2.pack(pady=10)
+
+          tk.Button(root, text="Ayarları Kaydet ve Başlat", command=finalize, bg="#27ae60", fg="white", font=("Arial", 10, "bold"), padx=20, pady=10).pack(pady=30)
+          
+          root.mainloop()
+          EOF
+
+          sudo chmod +x build/chroot/usr/local/bin/elka-installer.py
+
+          # Masaüstü Autostart Dosyası
+          sudo mkdir -p build/chroot/etc/xdg/autostart
+          cat <<EOF | sudo tee build/chroot/etc/xdg/autostart/elka-installer.desktop
+          [Desktop Entry]
+          Type=Application
+          Name=ELKA Installer
+          Exec=sudo /usr/bin/python3 /usr/local/bin/elka-installer.py
+          Terminal=false
+          X-GNOME-Autostart-enabled=true
+          EOF
+
+          # Sudoers yetkisi
+          echo "ogrenci ALL=(ALL) NOPASSWD: /usr/bin/python3 /usr/local/bin/elka-installer.py" | sudo tee -a build/chroot/etc/sudoers
+
+      - name: ELKA Markalama (Branding)
         run: |
-          xorriso -as mkisofs \
-            -o ELKA-Linux-amd64.iso \
-            -volid "ELKA_LINUX" \
-            -eltorito-boot boot/isolinux/isolinux.bin \
-            -eltorito-catalog boot/isolinux/boot.cat \
-            -no-emul-boot -boot-load-size 4 -boot-info-table \
-            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-            -eltorito-alt-boot \
-            -e boot/grub/efi.img \
-            -no-emul-boot \
-            iso/
+          # ELKA Duvar Kağıdı Dizini
+          sudo mkdir -p build/chroot/usr/share/wallpapers/ELKA/contents/images
+          # Placeholder wallpaper (Mavi arka plan)
+          sudo convert -size 1920x1080 xc:#2c3e50 build/chroot/usr/share/wallpapers/ELKA/contents/images/1920x1080.png || true
 
-      - name: Upload ISO artifact
+      - name: ISO İnşası (Hybrid BIOS/UEFI - Hatasız)
+        run: |
+          # RootFS SquashFS Sıkıştırma
+          sudo mksquashfs build/chroot build/image/live/filesystem.squashfs -comp xz -noappend
+          
+          # Boot Dosyaları
+          cp build/chroot/boot/vmlinuz-* build/image/live/vmlinuz
+          cp build/chroot/boot/initrd.img-* build/image/live/initrd
+          
+          # Grub Konfigürasyonu
+          cat <<EOF > build/image/boot/grub/grub.cfg
+          set timeout=3
+          set default=0
+          insmod all_video
+          
+          menuentry "ELKA Linux v1.0 (Egitim Surumu)" {
+              linux /live/vmlinuz boot=live quiet splash persistence ---
+              initrd /live/initrd
+          }
+          EOF
+          
+          # ISO Oluşturma
+          grub-mkrescue -o elka-linux-pro.iso build/image
+
+      - name: ISO'yu Yayınla
         uses: actions/upload-artifact@v4
         with:
-          name: ELKA-Linux-amd64
-          path: ELKA-Linux-amd64.iso
+          name: ELKA-Linux-Pro-ISO
+          path: elka-linux-pro.iso
+          
