@@ -1,118 +1,98 @@
-name: Build ELKA Linux (Fast & Stable Kernel)
+name: ELKA Linux ISO Build (amd64)
 
 on:
   push:
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    env:
-      KERNEL_VERSION: "6.6.15"
-      KERNEL_FLAVOR: "elka-fast"
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        sudo apt update
-        sudo apt install -y \
-          build-essential bc bison flex libssl-dev \
-          libelf-dev libncurses-dev dwarves \
-          live-build debootstrap initramfs-tools \
-          wget xz-utils git
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            debootstrap \
+            squashfs-tools \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            xorriso \
+            isolinux \
+            syslinux-utils \
+            coreutils \
+            dosfstools \
+            mtools
 
-    # ---------------- KERNEL ----------------
+      - name: Bootstrap Debian Bookworm
+        run: |
+          sudo debootstrap \
+            --arch=amd64 \
+            bookworm \
+            rootfs \
+            http://deb.debian.org/debian
 
-    - name: Download kernel
-      run: |
-        wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz
-        tar -xf linux-${KERNEL_VERSION}.tar.xz
+      - name: Copy ELKA Installer & Configs
+        run: |
+          sudo mkdir -p rootfs/usr/share/elka-installer
+          sudo cp -r config/elka-installer/* rootfs/usr/share/elka-installer/
 
-    - name: Configure fast & stable kernel
-      run: |
-        cd linux-${KERNEL_VERSION}
-        make defconfig
+      - name: Add first boot service
+        run: |
+          sudo chroot rootfs /bin/bash <<'EOF'
+          cat <<EOT > /usr/local/bin/elka-firstboot
+          #!/bin/bash
+          /usr/share/elka-installer/elka-installer
+          systemctl disable elka-firstboot.service
+          EOT
+          chmod +x /usr/local/bin/elka-firstboot
+          
+          cat <<EOT > /etc/systemd/system/elka-firstboot.service
+          [Unit]
+          Description=ELKA First Boot Setup
+          After=graphical.target
 
-        # ---- PANIC ÖNLEYİCİ ----
-        scripts/config --enable CONFIG_EXT4_FS
-        scripts/config --enable CONFIG_DEVTMPFS
-        scripts/config --enable CONFIG_DEVTMPFS_MOUNT
-        scripts/config --enable CONFIG_BLK_DEV_INITRD
-        scripts/config --enable CONFIG_TMPFS
-        scripts/config --enable CONFIG_PROC_FS
-        scripts/config --enable CONFIG_SYSFS
-        scripts/config --enable CONFIG_PCI
-        scripts/config --enable CONFIG_SATA_AHCI
-        scripts/config --enable CONFIG_VIRTIO_BLK
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/elka-firstboot
 
-        # ---- SYSTEMD ----
-        scripts/config --enable CONFIG_CGROUPS
-        scripts/config --enable CONFIG_CGROUP_CPUACCT
-        scripts/config --enable CONFIG_CGROUP_DEVICE
-        scripts/config --enable CONFIG_CGROUP_FREEZER
-        scripts/config --enable CONFIG_CGROUP_PIDS
-        scripts/config --enable CONFIG_NAMESPACES
-        scripts/config --enable CONFIG_PID_NS
-        scripts/config --enable CONFIG_NET_NS
+          [Install]
+          WantedBy=graphical.target
+          EOT
 
-        # ---- HIZLI BOOT (DEBUG KAPALI) ----
-        scripts/config --disable CONFIG_DEBUG_KERNEL
-        scripts/config --disable CONFIG_DEBUG_INFO
-        scripts/config --disable CONFIG_DEBUG_FS
-        scripts/config --disable CONFIG_FTRACE
-        scripts/config --disable CONFIG_FUNCTION_TRACER
-        scripts/config --disable CONFIG_STACKTRACE
-        scripts/config --disable CONFIG_KALLSYMS
-        scripts/config --disable CONFIG_PROFILING
-        scripts/config --disable CONFIG_LATENCYTOP
+          systemctl enable elka-firstboot.service
+          EOF
 
-        # ---- KERNEL İSMİ ----
-        scripts/config --set-str CONFIG_LOCALVERSION "-${KERNEL_FLAVOR}"
+      - name: Build SquashFS
+        run: |
+          sudo mksquashfs rootfs elka-rootfs.squashfs -comp xz
 
-        make olddefconfig
+      - name: Prepare ISO directory
+        run: |
+          mkdir iso
+          cp -r boot iso/
+          cp elka-rootfs.squashfs iso/
 
-    - name: Build kernel
-      run: |
-        cd linux-${KERNEL_VERSION}
-        make -j$(nproc)
-        sudo make modules_install
-        sudo make install
+      - name: Build ISO with xorriso
+        run: |
+          xorriso -as mkisofs \
+            -o ELKA-Linux-amd64.iso \
+            -volid "ELKA_LINUX" \
+            -eltorito-boot boot/isolinux/isolinux.bin \
+            -eltorito-catalog boot/isolinux/boot.cat \
+            -no-emul-boot -boot-load-size 4 -boot-info-table \
+            -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+            -eltorito-alt-boot \
+            -e boot/grub/efi.img \
+            -no-emul-boot \
+            iso/
 
-    - name: Create initramfs (panic blocker)
-      run: |
-        sudo update-initramfs -c -k ${KERNEL_VERSION}-${KERNEL_FLAVOR}
-
-    # ---------------- LIVE ISO ----------------
-
-    - name: Configure live-build
-      run: |
-        lb clean
-        lb config \
-          --distribution bookworm \
-          --binary-images iso-hybrid \
-          --linux-packages linux-image-${KERNEL_VERSION}-${KERNEL_FLAVOR}
-
-    - name: ELKA Linux branding
-      run: |
-        mkdir -p config/includes.chroot/etc
-        cat <<EOF > config/includes.chroot/etc/os-release
-        NAME="ELKA Linux"
-        ID=elka
-        PRETTY_NAME="ELKA Linux"
-        VERSION="1.0"
-        VERSION_ID="1.0"
-        EOF
-        echo "ELKA Linux 1.0" > config/includes.chroot/etc/issue
-
-    - name: Build ISO
-      run: |
-        sudo lb build
-
-    - name: Upload ISO
-      uses: actions/upload-artifact@v4
-      with:
-        name: elka-linux-fast-iso
-        path: "*.iso"
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ELKA-Linux-amd64
+          path: ELKA-Linux-amd64.iso
