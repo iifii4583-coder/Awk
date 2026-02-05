@@ -1,0 +1,52 @@
+name: HALOPAOS Android 17 HALOPAOS Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  halopaos:
+    name: HALOPAOS HALOPAOS HALOPAOS
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: HALOPAOS Checkout
+      uses: actions/checkout@v4
+
+    - name: HALOPAOS Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          bc bison build-essential curl flex g++ gcc git \
+          gnupg gperf libncurses5-dev libssl-dev \
+          python3 repo unzip zip zlib1g-dev
+
+    - name: HALOPAOS Repo Tool
+      run: |
+        mkdir -p ~/halopaos/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/halopaos/bin/repo
+        chmod +x ~/halopaos/bin/repo
+        echo "$HOME/halopaos/bin" >> $GITHUB_PATH
+
+    - name: HALOPAOS Init Android 17
+      run: |
+        repo init -u https://github.com/LineageOS/android.git -b lineage-22.0 --depth=1
+        repo sync -c -j$(nproc)
+
+    - name: HALOPAOS Trees
+      run: |
+        cp -r device halopaos-device || true
+        cp -r kernel halopaos-kernel || true
+        cp -r vendor halopaos-vendor || true
+        cp -r halopa halopaos-branding || true
+
+    - name: HALOPAOS Build HALOPAOS
+      run: |
+        source build/envsetup.sh
+        lunch halopa_gta9-userdebug
+        mka bacon -j$(nproc)
+
+    - name: HALOPAOS Upload HALOPAOS
+      uses: actions/upload-artifact@v4
+      with:
+        name: HALOPAOS-ANDROID17-HALOPAOS-GTA9
+        path: out/target/product/gta9/*HALOPAOS*.zip
