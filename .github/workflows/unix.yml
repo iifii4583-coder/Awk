@@ -1,4 +1,4 @@
-name: Build GODOS Ultimate OS
+name: Build GODOS Full Unix-like OS
 
 on:
   push:
@@ -85,7 +85,6 @@ jobs:
 
         void print(const char* str){ for(int i=0; str[i]; i++) print_char(str[i]); }
 
-        // -------- SHELL --------
         #define CMD_BUFFER 256
         class Shell {
         public:
@@ -96,32 +95,31 @@ jobs:
 
         Shell shell;
 
-        // -------- GUI --------
         class Window { public: int x,y,w,h; const char* title; Window(int _x,int _y,int width,int height,const char* t):x(_x),y(_y),w(width),h(height),title(t){} void draw(){ print(title); print("\\n"); } };
         Window mainWin(0,0,80,25,"GODOS Main Window");
 
-        // -------- PROCESS SCHEDULER --------
         class Process { public: void(*func)(); const char* name; Process(void(*f)(), const char* n):func(f),name(n){} };
-        #define MAX_PROCS 10
+        #define MAX_PROCS 20
         Process* processes[MAX_PROCS]; int proc_count=0;
         void add_process(Process* p){ if(proc_count<MAX_PROCS) processes[proc_count++]=p; }
         void scheduler(){ for(int i=0;i<proc_count;i++) processes[i]->func(); }
 
-        // -------- MEMORY MANAGEMENT (BASIC HEAP) --------
-        #define HEAP_START 0x01000000
-        #define HEAP_SIZE  0x00100000
-        uint8_t heap[HEAP_SIZE];
+        uint8_t heap[0x00200000];
 
-        // -------- NETWORK STACK (MINI TCP/IP PLACEHOLDER) --------
         class Network { public: void init(){ print("Network init...\\n"); } void http_get(const char* url){ print("GET "); print(url); print("\\n"); } };
         Network net;
 
-        // -------- KERNEL ENTRY --------
+        void app_hello(){ print("Hello from C++ app!\\n"); }
+        void app_demo(){ print("Demo process running...\\n"); }
+
         extern "C" void kernel_main(){
             clear_screen();
             print("Welcome to GODOS Ultimate Unix-like OS\\n");
             mainWin.draw();
             net.init();
+            add_process(new Process(app_hello,"HelloApp"));
+            add_process(new Process(app_demo,"DemoApp"));
+            scheduler();
             shell.run();
         }
         EOF
@@ -131,6 +129,11 @@ jobs:
         nasm -f elf32 src/boot/boot.asm -o boot.o
         g++ -m32 -ffreestanding -c src/kernel/kernel.cpp -o kernel.o -O2 -fno-exceptions -fno-rtti -fno-stack-protector
         ld -m elf_i386 -T linker.ld -o godos.bin boot.o kernel.o
+
+    # 🔹 Burada kernel'i ISO'ya kopyala
+    - name: Copy Kernel to ISO
+      run: |
+        cp godos.bin iso/boot/godos.bin
 
     - name: Add 100 MB filler to ISO
       run: |
