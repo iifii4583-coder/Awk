@@ -1,0 +1,182 @@
+name: Build GODOS Full Unix-like OS
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build-godos:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Install Build Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nasm g++-multilib gcc-multilib binutils xorriso grub-pc-bin grub-common qemu-system-x86
+
+    - name: Prepare Directories
+      run: |
+        mkdir -p src/boot src/kernel src/gui src/drivers src/process src/shell src/fs src/apps iso/boot/grub
+
+    # -----------------------------
+    # LINKER SCRIPT
+    # -----------------------------
+    - name: Generate Linker Script
+      run: |
+        cat <<EOF > linker.ld
+        ENTRY(start)
+        OUTPUT_FORMAT(elf32-i386)
+        SECTIONS {
+          . = 0x100000;
+          .text : { *(.text*) }
+          .rodata : { *(.rodata*) }
+          .data : { *(.data*) }
+          .bss : { *(.bss*) }
+        }
+        EOF
+
+    # -----------------------------
+    # BOOTLOADER
+    # -----------------------------
+    - name: Generate Bootloader
+      run: |
+        cat <<EOF > src/boot/boot.asm
+        bits 32
+        section .multiboot
+            align 4
+            dd 0x1BADB002
+            dd 0
+            dd -(0x1BADB002)
+
+        section .text
+        global start
+        extern kernel_main
+
+        start:
+            cli
+            mov esp, stack_space
+            call kernel_main
+            hlt
+
+        section .bss
+            resb 65536
+        stack_space:
+        EOF
+
+    # -----------------------------
+    # KERNEL + SHELL + GUI (C/C++)
+    # -----------------------------
+    - name: Generate Kernel & C++ Modules
+      run: |
+        cat <<EOF > src/kernel/kernel.cpp
+        #include <stdint.h>
+        #include <stddef.h>
+
+        // -------- VGA SCREEN --------
+        #define VGA_ADDRESS 0xB8000
+        #define WIDTH 80
+        #define HEIGHT 25
+        volatile uint16_t* buffer = (uint16_t*)VGA_ADDRESS;
+        int cursorX=0, cursorY=0;
+
+        void clear_screen(){
+            for(int i=0;i<WIDTH*HEIGHT;i++) buffer[i]=0x0720;
+            cursorX=0; cursorY=0;
+        }
+
+        void print_char(char c){
+            if(c=='\\n'){cursorX=0; cursorY++;} 
+            else { int idx=cursorY*WIDTH+cursorX; buffer[idx]=(uint16_t)c | 0x0700; cursorX++; }
+            if(cursorX>=WIDTH){cursorX=0; cursorY++;} 
+        }
+
+        void print(const char* str){
+            for(int i=0; str[i]; i++) print_char(str[i]);
+        }
+
+        // -------- SIMPLE SHELL --------
+        #define CMD_BUFFER 256
+        class Shell {
+        public:
+            char buffer[CMD_BUFFER];
+            int index;
+            Shell(){ index=0; for(int i=0;i<CMD_BUFFER;i++) buffer[i]=0; }
+
+            void run(){
+                print("GODOS Shell> ");
+                while(1){
+                    // Placeholder: input handling + command execution
+                }
+            }
+        };
+
+        Shell shell;
+
+        // -------- SIMPLE WINDOW / GUI --------
+        class Window {
+        public:
+            int x,y,width,height;
+            const char* title;
+            Window(int _x,int _y,int w,int h,const char* t):x(_x),y(_y),width(w),height(h),title(t){}
+            void draw(){ print(title); print("\\n"); }
+        };
+
+        Window mainWin(0,0,80,25,"GODOS Main Window");
+
+        // -------- BASIC PROCESS SCHEDULER --------
+        class Process {
+        public:
+            void (*func)();
+            const char* name;
+            Process(void(*f)(), const char* n):func(f),name(n){}
+        };
+        #define MAX_PROCS 10
+        Process* processes[MAX_PROCS];
+        int proc_count = 0;
+
+        void add_process(Process* p){ if(proc_count<MAX_PROCS) processes[proc_count++]=p; }
+
+        void scheduler(){
+            for(int i=0;i<proc_count;i++){
+                processes[i]->func();
+            }
+        }
+
+        // -------- KERNEL ENTRY --------
+        extern "C" void kernel_main(){
+            clear_screen();
+            print("Welcome to GODOS Full Unix-like OS\\n");
+            mainWin.draw();
+            shell.run();
+        }
+        EOF
+
+    # -----------------------------
+    # Compile & Link Kernel
+    # -----------------------------
+    - name: Compile and Link
+      run: |
+        nasm -f elf32 src/boot/boot.asm -o boot.o
+        g++ -m32 -ffreestanding -c src/kernel/kernel.cpp -o kernel.o -O2 -fno-exceptions -fno-rtti -fno-stack-protector
+        ld -m elf_i386 -T linker.ld -o godos.bin boot.o kernel.o
+
+    # -----------------------------
+    # Prepare ISO
+    # -----------------------------
+    - name: Prepare ISO
+      run: |
+        cp godos.bin iso/boot/godos.bin
+        echo "set timeout=0" > iso/boot/grub/grub.cfg
+        echo "set default=0" >> iso/boot/grub/grub.cfg
+        echo 'menuentry "GODOS Full Unix-like OS" { multiboot /boot/godos.bin; boot; }' >> iso/boot/grub/grub.cfg
+        grub-mkrescue -o GODOS.iso iso
+
+    # -----------------------------
+    # Upload ISO
+    # -----------------------------
+    - name: Upload ISO
+      uses: actions/upload-artifact@v4
+      with:
+        name: GODOS-ISO
+        path: GODOS.iso
